@@ -50,6 +50,75 @@ jobs:
           chmod +x bin/p1_release_gate_and_pack_v1.sh || true
           ./bin/p1_release_gate_and_pack_v1.sh
 
+
+      - name: Generate P2 audit files (evidence_index + iso27001 mapping)
+        run: |
+          set -euo pipefail
+          cd "$WORKDIR"
+          REL_DIR="$(ls -1dt out_ci/releases/REL_* | head -n1)"
+          echo "[REL_DIR]=$REL_DIR"
+
+          python3 - <<'PY'
+          import json, os, platform, subprocess, hashlib
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          workdir = Path(os.environ["WORKDIR"])
+          rel_dir  = workdir / os.environ.get("REL_DIR", "")
+
+          def sh(cmd): return subprocess.check_output(cmd, shell=True, text=True).strip()
+          def sha256(p: Path):
+            h=hashlib.sha256()
+            with p.open("rb") as f:
+              for chunk in iter(lambda: f.read(1024*1024), b""):
+                h.update(chunk)
+            return h.hexdigest()
+
+          outputs=[]
+          for p in sorted(rel_dir.rglob("*")):
+            if p.is_file():
+              outputs.append({"path": str(p.relative_to(workdir)), "size": p.stat().st_size, "sha256": sha256(p)})
+
+          versions={}
+          for cmd,key in [("python3 --version","python3"),("jq --version","jq"),("git --version","git"),("uname -a","uname")]:
+            try: versions[key]=sh(cmd)
+            except Exception as e: versions[key]=f"missing_or_error: {e}"
+
+          evidence={
+            "schema":"vsp.release.evidence_index.v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "who":{
+              "actor": os.environ.get("GITHUB_ACTOR"),
+              "run_id": os.environ.get("GITHUB_RUN_ID"),
+              "run_number": os.environ.get("GITHUB_RUN_NUMBER"),
+              "repository": os.environ.get("GITHUB_REPOSITORY"),
+              "ref": os.environ.get("GITHUB_REF"),
+              "sha": os.environ.get("GITHUB_SHA"),
+            },
+            "runner": {"os": platform.platform()},
+            "commands":["./bin/p1_release_gate_and_pack_v1.sh"],
+            "tool_versions": versions,
+            "outputs": outputs,
+            "verdict":{"release_job":"PASS"}
+          }
+          (rel_dir/"evidence_index.json").write_text(json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8")
+
+          mapping={
+            "schema":"vsp.iso27001.mapping.v1",
+            "note":"Starter mapping; customize theo Annex A bạn muốn.",
+            "examples":[
+              {"finding_type":"secrets","tools":["gitleaks"],"controls":["A.8.12","A.8.16"]},
+              {"finding_type":"code_vuln","tools":["semgrep","codeql"],"controls":["A.8.8","A.8.20"]},
+              {"finding_type":"image_pkg_vuln","tools":["trivy","grype"],"controls":["A.8.8","A.8.9"]},
+              {"finding_type":"iac_misconfig","tools":["kics"],"controls":["A.8.9","A.8.10"]},
+            ]
+          }
+          (rel_dir/"iso27001_mapping.json").write_text(json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8")
+          print("[OK] wrote P2 audit files")
+          PY
+        env:
+          REL_DIR: ${{ env.REL_DIR }}
+
       - name: NO-DRIFT GUARD (fail if any tracked file changed)
         run: |
           set -euo pipefail
@@ -76,6 +145,8 @@ jobs:
             /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/release_manifest.json
             /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/RELEASE_SHA256SUMS.txt
             /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/release.log
+            /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/evidence_index.json
+            /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/iso27001_mapping.json
 
   deploy_staging:
     name: Deploy staging (auto if PASS)
