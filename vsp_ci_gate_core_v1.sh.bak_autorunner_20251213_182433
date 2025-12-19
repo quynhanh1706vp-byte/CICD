@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_PREFIX="[VSP_CI_GATE]"
+
+log() {
+  echo "${LOG_PREFIX} $*"
+}
+
+# --- LẤY THÔNG TIN TỪ ENV / THAM SỐ ---
+
+BUNDLE_ROOT="${VSP_BUNDLE_ROOT:-/home/test/Data/SECURITY_BUNDLE}"
+SRC_ROOT="${VSP_SRC_ROOT:-}"
+RUN_ID="${VSP_RUN_ID:-VSP_CI_$(date +%Y%m%d_%H%M%S)}"
+
+if [[ $# -ge 1 && -n "${1:-}" ]]; then
+  RUN_DIR="$1"
+export RUN_DIR  # VSP: export để run_all_tools_v2.sh không bị unbound
+elif [[ -n "${VSP_RUN_DIR:-}" ]]; then
+  RUN_DIR="${VSP_RUN_DIR}"
+else
+  RUN_DIR="${BUNDLE_ROOT}/out/${RUN_ID}"
+fi
+
+log "BUNDLE_ROOT = ${BUNDLE_ROOT}"
+log "SRC_ROOT    = ${SRC_ROOT:-<EMPTY>}"
+log "RUN_DIR     = ${RUN_DIR}"
+log "RUN_ID      = ${RUN_ID}"
+
+if [[ -z "${SRC_ROOT}" ]]; then
+  log "ERROR: VSP_SRC_ROOT (SRC_ROOT) chưa được set – outer phải export VSP_SRC_ROOT."
+  exit 2
+fi
+
+if [[ ! -d "${SRC_ROOT}" ]]; then
+  log "ERROR: SRC_ROOT không tồn tại: ${SRC_ROOT}"
+  exit 3
+fi
+
+if [[ ! -d "${BUNDLE_ROOT}" ]]; then
+  log "ERROR: BUNDLE_ROOT không tồn tại: ${BUNDLE_ROOT}"
+  exit 4
+fi
+
+mkdir -p "${RUN_DIR}"
+
+# --- XÁC ĐỊNH RUNNER CỦA SECURITY_BUNDLE ---
+
+# Mặc định dùng run_all_tools_v2.sh, có thể override bằng ENV VSP_RUNNER
+RUNNER="${VSP_RUNNER:-${BUNDLE_ROOT}/bin/run_all_tools_v2.sh}"
+
+log "RUNNER      = ${RUNNER}"
+
+if [[ ! -x "${RUNNER}" ]]; then
+  log "ERROR: Không tìm thấy runner hoặc không có quyền chạy: ${RUNNER}"
+  log "       Set ENV VSP_RUNNER cho đúng script runner trong SECURITY_BUNDLE."
+  exit 5
+fi
+
+# --- CHẠY RUNNER ---
+
+log "=== CHẠY RUNNER VSP (FULL SCAN) ==="
+log "Cmd: ${RUNNER} \"${SRC_ROOT}\" \"${RUN_DIR}\""
+
+START_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+set +e
+# LƯU Ý: truyền SRC_ROOT trước, RUN_DIR sau (theo run_all_tools_v2.sh)
+"${RUNNER}" "${SRC_ROOT}" "${RUN_DIR}"
+RC_RUNNER=$?
+set -e
+
+END_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+log "Runner kết thúc với RC=${RC_RUNNER}"
+# === VSP_CI_GATE_NORMALIZE_RUNNER_RC_V1 ===
+RAW_RUNNER_RC="${RUNNER_RC:-0}"
+RUNNER_DEGRADED=0
+# 0: clean, 1: bandit findings, 50: kics findings  -> coi như OK để gate quyết định
+if [ "$RAW_RUNNER_RC" = "0" ] || [ "$RAW_RUNNER_RC" = "1" ] || [ "$RAW_RUNNER_RC" = "50" ]; then
+  RUNNER_RC=0
+else
+  RUNNER_DEGRADED=1
+fi
+log "[VSP_CI_GATE] Runner RC normalize: raw=${RAW_RUNNER_RC} -> rc=${RUNNER_RC} degraded=${RUNNER_DEGRADED}"
+# === END VSP_CI_GATE_NORMALIZE_RUNNER_RC_V1 ===
+
+
+# --- SAU RUNNER: THỬ UNIFY ĐỂ TẠO 2 FILE JSON THƯƠNG MẠI ---
+
+REPORT_DIR="${RUN_DIR}/report"
+SUMMARY_JSON="${REPORT_DIR}/summary_unified.json"
+
+if [[ ! -f "${SUMMARY_JSON}" ]]; then
+  log "Không thấy ${SUMMARY_JSON}, thử gọi engine unify BE để build báo cáo thương mại..."
+
+  # Cho phép override engine unify qua ENV:
+  #   export VSP_UNIFY_SCRIPT=/home/test/Data/SECURITY_BUNDLE/bin/<script_unify_thật>.sh
+  UNIFY_SCRIPT="${VSP_UNIFY_SCRIPT:-${BUNDLE_ROOT}/bin/vsp_unify_from_run_dir_v1.sh}"
+
+  if [[ -x "${UNIFY_SCRIPT}" ]]; then
+    log "UNIFY_SCRIPT = ${UNIFY_SCRIPT}"
+    log "Gọi unify với RUN_DIR = ${RUN_DIR}"
+
+    set +e
+    "${UNIFY_SCRIPT}" "${RUN_DIR}"
+    RC_UNIFY=$?
+    set -e
+
+    log "Unify kết thúc với RC=${RC_UNIFY}"
+  else
+    log "WARN: Không tìm thấy script unify: ${UNIFY_SCRIPT}"
+    log "      (Set ENV VSP_UNIFY_SCRIPT để trỏ đúng engine unify BE đang dùng)."
+  fi
+fi
+
+# Sau khi unify (nếu có), kiểm tra lại summary_unified.json
+SUMMARY_JSON="${REPORT_DIR}/summary_unified.json"
+
+if [[ ! -f "${SUMMARY_JSON}" ]]; then
+  log "WARN: Không tìm thấy ${SUMMARY_JSON} – bỏ qua phần gate theo severity."
+  log "      Kiểm tra lại unify trong runner hoặc script unify BE."
+  exit "${RC_RUNNER}"
+fi
+
+log "Đọc severity từ ${SUMMARY_JSON}"
+
+CRIT=$(jq -r '.summary_by_severity.CRITICAL // 0' "${SUMMARY_JSON}" 2>/dev/null || echo 0)
+HIGH=$(jq -r '.summary_by_severity.HIGH // 0' "${SUMMARY_JSON}" 2>/dev/null || echo 0)
+MED=$(jq -r '.summary_by_severity.MEDIUM // 0' "${SUMMARY_JSON}" 2>/dev/null || echo 0)
+LOW=$(jq -r '.summary_by_severity.LOW // 0' "${SUMMARY_JSON}" 2>/dev/null || echo 0)
+INFO=$(jq -r '.summary_by_severity.INFO // 0' "${SUMMARY_JSON}" 2>/dev/null || echo 0)
+TRACE=$(jq -r '.summary_by_severity.TRACE // 0' "${SUMMARY_JSON}" 2>/dev/null || echo 0)
+
+log "Severity counts:"
+log "  CRITICAL = ${CRIT}"
+log "  HIGH     = ${HIGH}"
+log "  MEDIUM   = ${MED}"
+log "  LOW      = ${LOW}"
+log "  INFO     = ${INFO}"
+log "  TRACE    = ${TRACE}"
+
+# Ngưỡng gate – có thể override từ ENV
+MAX_CRIT=${VSP_MAX_CRITICAL:-0}   # mặc định CI fail nếu CRITICAL > 0
+MAX_HIGH=${VSP_MAX_HIGH:-10}      # mặc định CI fail nếu HIGH > 10
+
+RC_GATE=0
+
+if (( CRIT > MAX_CRIT )); then
+  log "GATE FAIL: CRITICAL (${CRIT}) > MAX_CRITICAL (${MAX_CRIT})"
+  RC_GATE=1
+fi
+
+if (( HIGH > MAX_HIGH )); then
+  log "GATE FAIL: HIGH (${HIGH}) > MAX_HIGH (${MAX_HIGH})"
+  RC_GATE=1
+fi
+
+if (( RC_GATE == 0 )); then
+  log "GATE PASS: CRIT=${CRIT} (<=${MAX_CRIT}), HIGH=${HIGH} (<=${MAX_HIGH})"
+else
+  log "GATE RESULT: FAIL (dựa trên severity threshold)"
+fi
+
+if (( RC_RUNNER != 0 )); then
+  FINAL_RC=${RC_RUNNER}
+elif (( RC_GATE != 0 )); then
+  FINAL_RC=${RC_GATE}
+else
+  FINAL_RC=0
+fi
+
+log "Start (UTC) : ${START_TS}"
+log "End   (UTC) : ${END_TS}"
+log "Final RC    : ${FINAL_RC}"
+
+exit "${FINAL_RC}"

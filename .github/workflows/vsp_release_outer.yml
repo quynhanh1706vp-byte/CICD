@@ -1,0 +1,47 @@
+name: VSP Release (OUTER)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    env:
+      WORKDIR: /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER
+
+    steps:
+      - name: Checkout this repo into WORKDIR (exact commit)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKDIR"
+          if [ ! -d "$WORKDIR/.git" ]; then
+            git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORKDIR"
+          fi
+          cd "$WORKDIR"
+          git fetch --all --prune
+          git checkout -f "${GITHUB_SHA}"
+          git submodule update --init --recursive || true
+
+      - name: Run P1 release (gate + pack)
+        run: |
+          set -euo pipefail
+          cd "$WORKDIR"
+          chmod +x bin/p1_release_gate_and_pack_v1.sh || true
+          ./bin/p1_release_gate_and_pack_v1.sh
+
+      - name: Upload artifacts (boss/audit download)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsp-ui-release-${{ github.run_number }}-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/VSP_UI_RELEASE_*.tgz
+            /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/release_manifest.json
+            /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/RELEASE_SHA256SUMS.txt
+            /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/release.log

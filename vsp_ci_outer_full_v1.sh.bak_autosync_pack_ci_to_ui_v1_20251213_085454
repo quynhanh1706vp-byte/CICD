@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_PREFIX="[VSP_CI_OUTER]"
+log() { echo "${LOG_PREFIX} $*"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+log "REPO_ROOT  = ${REPO_ROOT}"
+log "SCRIPT_DIR = ${SCRIPT_DIR}"
+
+BUNDLE_ROOT="${VSP_BUNDLE_ROOT:-/home/test/Data/SECURITY_BUNDLE}"
+log "BUNDLE_ROOT= ${BUNDLE_ROOT}"
+
+if [[ ! -d "${BUNDLE_ROOT}" ]]; then
+  log "ERROR: BUNDLE_ROOT không tồn tại: ${BUNDLE_ROOT}"
+  exit 2
+fi
+
+if [[ $# -ge 1 && -n "${1:-}" ]]; then
+  SRC_ROOT="$1"
+else
+  SRC_ROOT="${VSP_SRC_ROOT:-${REPO_ROOT}}"
+fi
+
+if [[ ! -d "${SRC_ROOT}" ]]; then
+  log "ERROR: SRC_ROOT không tồn tại: ${SRC_ROOT}"
+  exit 3
+fi
+
+log "SRC_ROOT   = ${SRC_ROOT}"
+
+RUN_ID="${VSP_RUN_ID:-VSP_CI_$(date +%Y%m%d_%H%M%S)}"
+OUT_CI_ROOT="${REPO_ROOT}/out_ci"
+RUN_DIR="${VSP_RUN_DIR:-${OUT_CI_ROOT}/${RUN_ID}}"
+
+mkdir -p "${RUN_DIR}" "${OUT_CI_ROOT}"
+log "RUN_ID     = ${RUN_ID}"
+log "RUN_DIR    = ${RUN_DIR}"
+
+export VSP_BUNDLE_ROOT="${BUNDLE_ROOT}"
+export VSP_SRC_ROOT="${SRC_ROOT}"
+export VSP_RUN_ID="${RUN_ID}"
+export VSP_RUN_DIR="${RUN_DIR}"
+
+GATE_CORE="${SCRIPT_DIR}/vsp_ci_gate_core_v1.sh"
+if [[ ! -x "${GATE_CORE}" ]]; then
+  log "ERROR: Không chạy được GATE_CORE: ${GATE_CORE}"
+  exit 4
+fi
+
+log "=== VSP CI OUTER BẮT ĐẦU ==="
+log "Gọi gate core: ${GATE_CORE}"
+
+set +e
+"${GATE_CORE}" "${RUN_DIR}"
+RC_GATE=$?
+set -e
+
+log "Gate core kết thúc với mã trả về: ${RC_GATE}"
+
+# Ghi CI_SUMMARY.txt thô + bản human readable
+CI_SUMMARY="${RUN_DIR}/CI_SUMMARY.txt"
+{
+  echo "VSP_CI_OUTER SUMMARY"
+  echo "===================="
+  echo "REPO_ROOT  = ${REPO_ROOT}"
+  echo "SRC_ROOT   = ${SRC_ROOT}"
+  echo "BUNDLE_ROOT= ${BUNDLE_ROOT}"
+  echo "RUN_ID     = ${RUN_ID}"
+  echo "RUN_DIR    = ${RUN_DIR}"
+  echo "RC_GATE    = ${RC_GATE}"
+  if [[ -f "${RUN_DIR}/report/summary_unified.json" ]]; then
+    echo
+    echo "SUMMARY_BY_SEVERITY:"
+    jq '.summary_by_severity' "${RUN_DIR}/report/summary_unified.json" 2>/dev/null || true
+  fi
+} > "${CI_SUMMARY}" || true
+
+HUMAN_SUMMARY_SCRIPT="${SCRIPT_DIR}/vsp_ci_build_human_summary_v1.sh"
+if [[ -x "${HUMAN_SUMMARY_SCRIPT}" ]]; then
+  "${HUMAN_SUMMARY_SCRIPT}" "${RUN_DIR}" || true
+fi
+
+if [[ ${RC_GATE} -eq 0 ]]; then
+  log "=== VSP CI OUTER: THÀNH CÔNG (RC=0) ==="
+else
+  log "=== VSP CI OUTER: THẤT BẠI (RC=${RC_GATE}) ==="
+fi
+
+exit "${RC_GATE}"
+
+
+# === AUTO SYNC TO VSP CORE (commercial flow) ===
+echo "[VSP_CI_OUTER] Auto-sync CI RUN_DIR -> VSP core out/ (best-effort)"
+SYNC="${BUNDLE_ROOT}/bin/vsp_ci_sync_to_vsp_v1.sh"
+if [ -x "$SYNC" ]; then
+  "$SYNC" "$RUN_DIR" || echo "[VSP_CI_OUTER] WARN: sync failed (ignored)"
+else
+  echo "[VSP_CI_OUTER] WARN: sync script not found: $SYNC"
+fi
+# === END AUTO SYNC ===
+

@@ -1,0 +1,8 @@
+# Không lưu output scan vào repo CI
+out/
+*.log
+
+# Python venv nếu có
+.venv/
+__pycache__/
+*.pyc

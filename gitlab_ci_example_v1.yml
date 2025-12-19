@@ -1,0 +1,17 @@
+security_vsp_full_ext:
+  stage: security
+  image: alpine:latest
+  script:
+    - apk add --no-cache bash git
+    - git clone ${VSP_BUNDLE_REPO_URL} SECURITY_BUNDLE
+    - cd SECURITY_BUNDLE
+    - chmod +x VSP_CI_OUTER/vsp_ci_outer_full_v1.sh
+    - VSP_TARGET_PATH="$CI_PROJECT_DIR" \
+      VSP_PROFILE="FULL_EXT" \
+      VSP_RUN_ID_HINT="RUN_VSP_CI_${CI_PIPELINE_ID}" \
+      VSP_CI_OUTER/vsp_ci_outer_full_v1.sh "$CI_PROJECT_DIR"
+  artifacts:
+    paths:
+      - SECURITY_BUNDLE/out
+  tags:
+    - vsp-runner
