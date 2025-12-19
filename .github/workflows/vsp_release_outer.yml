@@ -5,36 +5,67 @@ on:
     branches: [ "main" ]
   workflow_dispatch: {}
 
+concurrency:
+  group: vsp-release-outer-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
+    name: Gate + Pack + Publish Artifacts (no UI drift)
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 60
+
     env:
       WORKDIR: /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER
 
     steps:
-      - name: Checkout this repo into WORKDIR (exact commit)
+      - name: Prepare repo in WORKDIR at current commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$WORKDIR"
+
           if [ ! -d "$WORKDIR/.git" ]; then
+            echo "[INFO] clone into $WORKDIR"
             git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$WORKDIR"
           fi
+
           cd "$WORKDIR"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git fetch --all --prune
           git checkout -f "${GITHUB_SHA}"
           git submodule update --init --recursive || true
 
-      - name: Run P1 release (gate + pack)
+          echo "[OK] repo ready at:"
+          git rev-parse --short HEAD
+
+          # Hard guard: script must exist
+          test -f bin/p1_release_gate_and_pack_v1.sh
+
+      - name: Run commercial P1 release (gate + pack)
         run: |
           set -euo pipefail
           cd "$WORKDIR"
           chmod +x bin/p1_release_gate_and_pack_v1.sh || true
           ./bin/p1_release_gate_and_pack_v1.sh
 
-      - name: Upload artifacts (boss/audit download)
+      - name: NO-DRIFT GUARD (fail if any tracked file changed)
+        run: |
+          set -euo pipefail
+          cd "$WORKDIR"
+
+          # ignore untracked (out_ci/* etc). We only care if CI modified tracked files.
+          CHG="$(git status --porcelain --untracked-files=no || true)"
+          if [ -n "$CHG" ]; then
+            echo "[ERR] CI changed tracked files (UI/code drift). Stop."
+            echo "$CHG"
+            git diff --stat || true
+            exit 2
+          fi
+          echo "[OK] no tracked changes (UI standard preserved)."
+
+      - name: Upload release artifacts (boss/audit download)
         uses: actions/upload-artifact@v4
         with:
           name: vsp-ui-release-${{ github.run_number }}-${{ github.sha }}
@@ -45,3 +76,30 @@ jobs:
             /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/release_manifest.json
             /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/RELEASE_SHA256SUMS.txt
             /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER/out_ci/releases/REL_*/release.log
+
+  deploy_staging:
+    name: Deploy staging (auto if PASS)
+    runs-on: [self-hosted, linux, x64]
+    needs: [release]
+    if: ${{ needs.release.result == 'success' }}
+    steps:
+      - name: Deploy staging
+        run: |
+          set -euo pipefail
+          cd /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER
+          echo "[TODO] gọi script deploy staging ở đây"
+          # ./bin/deploy_staging_v1.sh
+
+  deploy_prod:
+    name: Deploy prod (manual approval)
+    runs-on: [self-hosted, linux, x64]
+    needs: [release]
+    if: ${{ needs.release.result == 'success' }}
+    environment:
+      name: production
+    steps:
+      - name: Deploy prod (manual)
+        run: |
+          set -euo pipefail
+          cd /home/test/Data/SECURITY-10-10-v4/ci/VSP_CI_OUTER
+          echo "[TODO] deploy prod; dùng release.tgz + sha"
